@@ -23,6 +23,8 @@
 #include "utils.h"
 #include "log.h"
 
+static const char *lowmem = "<Can't print error, not enough memory>";
+
 typedef void (*log_func)(const char *file, int line, const char *func, int priority, const char *message, const char *appendix);
 
 static void fprint_timestamp(
@@ -63,22 +65,19 @@ static void syslog_msg(const char *file, int line, const char *func, int priorit
 
 static log_func log_msg = stderr_msg;
 static log_func log_msg_next = NULL;
-static int log_mask = LOG_MASK(LOG_NOTICE)|LOG_MASK(LOG_WARNING)|LOG_MASK(LOG_ERR);
+
 
 int log_preopen(const char *dst, bool log_debug, bool log_info)
 {
 	const char *syslog_prefix = "syslog:";
 	const char *file_prefix = "file:";
-	if (log_debug)
-		log_mask |= LOG_MASK(LOG_DEBUG);
-	if (log_info)
-		log_mask |= LOG_MASK(LOG_INFO);
 	if (strcmp(dst, "stderr") == 0) {
 		log_msg_next = stderr_msg;
 	}
 	else if (strncmp(dst, syslog_prefix, strlen(syslog_prefix)) == 0) {
 		const char *facility_name = dst + strlen(syslog_prefix);
 		int facility = -1;
+		int logmask;
 		struct {
 			char *name; int value;
 		} *ptpl, tpl[] = {
@@ -105,12 +104,12 @@ int log_preopen(const char *dst, bool log_debug, bool log_info)
 
 		openlog("redsocks", LOG_NDELAY | LOG_PID, facility);
 
-		log_mask = setlogmask(0);
+		logmask = setlogmask(0);
 		if (!log_debug)
-			log_mask &= ~(LOG_MASK(LOG_DEBUG));
+			logmask &= ~(LOG_MASK(LOG_DEBUG));
 		if (!log_info)
-			log_mask &= ~(LOG_MASK(LOG_INFO));
-		setlogmask(log_mask);
+			logmask &= ~(LOG_MASK(LOG_INFO));
+		setlogmask(logmask);
 
 		log_msg_next = syslog_msg;
 	}
@@ -139,12 +138,20 @@ void log_open()
 void _log_vwrite(const char *file, int line, const char *func, int do_errno, int priority, const char *fmt, va_list ap)
 {
 	int saved_errno = errno;
-	char message[MAX_LOG_LENGTH+1];
+	struct evbuffer *buff = evbuffer_new();
+	const char *message;
 
-	if (!(log_mask & LOG_MASK(priority)))
-		return;
-	vsnprintf(&message[0], sizeof(message), fmt, ap);
-	log_msg(file, line, func, priority, &message[0], do_errno ? strerror(saved_errno) : NULL);
+	if (buff) {
+		evbuffer_add_vprintf(buff, fmt, ap);
+		message = (const char*)EVBUFFER_DATA(buff);
+	}
+	else
+		message = lowmem;
+
+	log_msg(file, line, func, priority, message, do_errno ? strerror(saved_errno) : NULL);
+
+	if (buff)
+		evbuffer_free(buff);
 }
 
 void _log_write(const char *file, int line, const char *func, int do_errno, int priority, const char *fmt, ...)

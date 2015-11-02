@@ -35,10 +35,10 @@ extern app_subsys autoproxy_app_subsys;
 extern app_subsys cache_app_subsys;
 
 app_subsys *subsystems[] = {
-	&base_subsys,
 	&redsocks_subsys,
+	&base_subsys,
 	&autoproxy_app_subsys,
-	&cache_app_subsys,
+    &cache_app_subsys,
 	&redudp_subsys,
 	&tcpdns_subsys,
 };
@@ -145,7 +145,6 @@ int main(int argc, char **argv)
 	if (!g_event_base)
 		return EXIT_FAILURE;
 		
-	memset(&dumper, 0, sizeof(dumper));
 	memset(terminators, 0, sizeof(terminators));
 
 	FOREACH(ss, subsystems) {
@@ -175,6 +174,7 @@ int main(int argc, char **argv)
 		}
 	}
 
+    memset(&dumper, 0, sizeof(dumper));
     evsignal_assign(&dumper, get_event_base(), SIGUSR1, dump_handler, NULL);
     if (evsignal_add(&dumper, NULL) != 0) {
         log_errno(LOG_ERR, "evsignal_add");

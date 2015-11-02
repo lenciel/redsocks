@@ -23,9 +23,12 @@
 #include "log.h"
 #include "redsocks.h"
 #include "encrypt.h"
-#include "shadowsocks.h"
 
 #define INITIAL_BUFFER_SIZE 8192
+
+static const int ss_addrtype_ipv4 = 1;
+static const int ss_addrtype_domain = 3;
+static const int ss_addrtype_ipv6 = 4;
 
 typedef enum ss_state_t {
     ss_new,
@@ -41,6 +44,9 @@ typedef struct ss_client_t {
 typedef struct ss_instance_t {
     int init;
     int method; 
+    // Clients of each instance share a same buffer for encryption/decryption
+    void * buff;
+    size_t buff_size;
     enc_info info;
 } ss_instance;
 
@@ -61,51 +67,54 @@ int ss_is_valid_cred(const char *method, const char *password)
     return 1;
 }
 
-static void ss_client_init(redsocks_client *client)
+void ss_client_init(redsocks_client *client)
 {
     ss_client *sclient = (void*)(client + 1);
     ss_instance * ss = (ss_instance *)(client->instance+1);
 
     client->state = ss_new;
-    if (enc_ctx_init(&ss->info, &sclient->e_ctx, 1))
-        log_error(LOG_ERR, "Shadowsocks failed to initialize encryption context.");
-    if (enc_ctx_init(&ss->info, &sclient->d_ctx, 0))
-        log_error(LOG_ERR, "Shadowsocks failed to initialize decryption context.");
+    enc_ctx_init(&ss->info, &sclient->e_ctx, 1);
+    enc_ctx_init(&ss->info, &sclient->d_ctx, 0);
 }
 
-static void ss_client_fini(redsocks_client *client)
+void ss_client_fini(redsocks_client *client)
 {
     ss_client *sclient = (void*)(client + 1);
     enc_ctx_free(&sclient->e_ctx);
     enc_ctx_free(&sclient->d_ctx);
 }
 
+static void get_shared_buffer(redsocks_client *client, size_t in_size, void **buff, size_t *buff_size)
+{
+    ss_instance * ss = (ss_instance *)(client->instance+1);
+
+    size_t required = max(ss_calc_buffer_size(ss->method, in_size), 
+                          ss_calc_buffer_size(ss->method, in_size));
+    if (ss->buff_size < required)
+    {
+        ss->buff = realloc(buff, required);
+        ss->buff_size = required; 
+    }
+    *buff = ss->buff;
+    *buff_size = ss->buff_size;
+}
+
 static void encrypt_mem(redsocks_client * client,
                       char * data, size_t len,
-                      struct bufferevent * to, int decrypt)
+                      struct bufferevent * to)
 {
     ss_client *sclient = (void*)(client + 1);
-    struct evbuffer_iovec vec;
-    struct evbuffer * buf_out = bufferevent_get_output(to);
-    size_t required;
+    size_t buff_len;
+    char * buff;
     int rc;
 
-    if (!len || !data)
+    get_shared_buffer(client, len, (void **)&buff, &buff_len);
+    if (! data || !len)
         return;
-
-    if (decrypt)
-        required = ss_calc_buffer_size(&sclient->d_ctx, len);
-    else
-        required = ss_calc_buffer_size(&sclient->e_ctx, len);
-    if (required && evbuffer_reserve_space(buf_out, required, &vec, 1) == 1)
+    rc = ss_encrypt(&sclient->e_ctx, data, len, buff, &buff_len); 
+    if (rc)
     {
-        if (decrypt)
-            rc = ss_decrypt(&sclient->d_ctx, data, len, vec.iov_base, &vec.iov_len);
-        else
-            rc = ss_encrypt(&sclient->e_ctx, data, len, vec.iov_base, &vec.iov_len);
-        if (!rc)
-            vec.iov_len = 0;
-        evbuffer_commit_space(buf_out, &vec, 1);
+        bufferevent_write(to, buff, buff_len);
     }
 }
 
@@ -114,34 +123,40 @@ static void encrypt_buffer(redsocks_client *client,
                            struct bufferevent * from,
                            struct bufferevent * to)
 {
-    // To reduce memory copy, just encrypt one block a time
-    struct evbuffer * buf_in = bufferevent_get_input(from);
-    size_t input_size = evbuffer_get_contiguous_space(buf_in);
+    size_t input_size = evbuffer_get_length(bufferevent_get_input(from));
     char * input;
 
     if (!input_size)
         return;
 
-    input = (char *)evbuffer_pullup(buf_in, input_size);    
-    encrypt_mem(client, input, input_size, to, 0);
-    evbuffer_drain(buf_in, input_size);
+    input = (char *)evbuffer_pullup(bufferevent_get_input(from), input_size);    
+    encrypt_mem(client, input, input_size, to); 
+    evbuffer_drain(bufferevent_get_input(from), input_size);
 }
 
 static void decrypt_buffer(redsocks_client * client,
                            struct bufferevent * from,
                            struct bufferevent * to)
 {
-    // To reduce memory copy, just decrypt one block a time
-    struct evbuffer * buf_in = bufferevent_get_input(from);
-    size_t input_size = evbuffer_get_contiguous_space(buf_in);
+    ss_client *sclient = (void*)(client + 1);
+    struct enc_ctx * ctx = &sclient->d_ctx; 
+    size_t input_size = evbuffer_get_length(bufferevent_get_input(from));
+    size_t buff_len;
+    char * buff;
     char * input;
+    int    rc;
 
-    if (!input_size)
+    get_shared_buffer(client, input_size, (void **)&buff, &buff_len);
+    if (!buff || !input_size)
         return;
 
-    input = (char *)evbuffer_pullup(buf_in, input_size);
-    encrypt_mem(client, input, input_size, to, 1);
-    evbuffer_drain(buf_in, input_size);
+    input = (char *)evbuffer_pullup(bufferevent_get_input(from), input_size);
+    rc = ss_decrypt(ctx, input, input_size, buff, &buff_len); 
+    if (rc)
+    {
+        bufferevent_write(to, buff, buff_len);
+        evbuffer_drain(bufferevent_get_input(from), input_size);
+    }
 }
 
 
@@ -150,14 +165,18 @@ static void ss_client_writecb(struct bufferevent *buffev, void *_arg)
     redsocks_client *client = _arg;
     struct bufferevent * from = client->relay;
     struct bufferevent * to   = buffev;
-    size_t input_size = evbuffer_get_contiguous_space(bufferevent_get_input(from));
+    char from_eof = client->relay_evshut & EV_READ;
+    size_t input_size = evbuffer_get_length(bufferevent_get_input(from));
     size_t output_size = evbuffer_get_length(bufferevent_get_output(to));
 
     assert(buffev == client->client);
     redsocks_touch_client(client);
 
-    if (process_shutdown_on_write_(client, from, to))
+    if (input_size == 0 && from_eof)
+    {
+        redsocks_shutdown(client, to, SHUT_WR);
         return;
+    }
 
     if (client->state == ss_connected) 
     {
@@ -166,7 +185,7 @@ static void ss_client_writecb(struct bufferevent *buffev, void *_arg)
         {
             if (input_size)
                 decrypt_buffer(client, from, to);
-            if (!(client->relay_evshut & EV_READ) && bufferevent_enable(from, EV_READ) == -1)
+            if (bufferevent_enable(from, EV_READ) == -1)
                 redsocks_log_errno(client, LOG_ERR, "bufferevent_enable");
         }
     }
@@ -213,14 +232,18 @@ static void ss_relay_writecb(struct bufferevent *buffev, void *_arg)
     redsocks_client *client = _arg;
     struct bufferevent * from = client->client;
     struct bufferevent * to   = buffev;
-    size_t input_size = evbuffer_get_contiguous_space(bufferevent_get_input(from));
+    char from_eof = client->client_evshut & EV_READ;
+    size_t input_size = evbuffer_get_length(bufferevent_get_input(from));
     size_t output_size = evbuffer_get_length(bufferevent_get_output(to));
 
     assert(buffev == client->relay);
     redsocks_touch_client(client);
 
-    if (process_shutdown_on_write_(client, from, to))
+    if (input_size == 0 && from_eof)
+    {
+        redsocks_shutdown(client, to, SHUT_WR);
         return;
+    }
 
     if (client->state == ss_connected) 
     {
@@ -229,8 +252,8 @@ static void ss_relay_writecb(struct bufferevent *buffev, void *_arg)
         {
             if (input_size)
                 encrypt_buffer(client, from, to);
-            if (!(client->client_evshut & EV_READ) && bufferevent_enable(from, EV_READ) == -1)
-                redsocks_log_errno(client, LOG_ERR, "bufferevent_enable");
+            if (bufferevent_enable(from, EV_READ) == -1)
+                    redsocks_log_errno(client, LOG_ERR, "bufferevent_enable");
         }
     }
     else
@@ -244,7 +267,7 @@ static void ss_relay_readcb(struct bufferevent *buffev, void *_arg)
     redsocks_client *client = _arg;
     struct bufferevent * from = buffev;
     struct bufferevent * to   = client->client;
-    size_t input_size = evbuffer_get_contiguous_space(bufferevent_get_input(from));
+    size_t input_size = evbuffer_get_length(bufferevent_get_input(from));
     size_t output_size = evbuffer_get_length(bufferevent_get_output(to));
 
     assert(buffev == client->relay);
@@ -275,7 +298,7 @@ static void ss_relay_readcb(struct bufferevent *buffev, void *_arg)
 static void ss_relay_connected(struct bufferevent *buffev, void *_arg)
 {
     redsocks_client *client = _arg;
-    ss_header_ipv4 header;
+    char buff[512] ; 
     size_t len = 0;
 
     assert(buffev == client->relay);
@@ -288,7 +311,6 @@ static void ss_relay_connected(struct bufferevent *buffev, void *_arg)
         return;
     }
 
-    client->relay_connected = 1;
     /* We do not need to detect timeouts any more.
     The two peers will handle it. */
     bufferevent_set_timeouts(client->relay, NULL, NULL);
@@ -313,12 +335,14 @@ static void ss_relay_connected(struct bufferevent *buffev, void *_arg)
     }
 
     /* build and send header */
-    // TODO: Better implementation and IPv6 Support
-    header.addr_type = ss_addrtype_ipv4;
-    header.addr = client->destaddr.sin_addr.s_addr;
-    header.port = client->destaddr.sin_port;
-    len += sizeof(header);
-    encrypt_mem(client, (char *)&header, len, client->relay, 0);
+    // TODO:
+    buff[len] = ss_addrtype_ipv4;
+    len += 1;
+    memcpy(&buff[len], &client->destaddr.sin_addr, sizeof(client->destaddr.sin_addr));
+    len += sizeof(client->destaddr.sin_addr);
+    memcpy(&buff[len], &client->destaddr.sin_port, sizeof(client->destaddr.sin_port));
+    len += sizeof(client->destaddr.sin_port);
+    encrypt_mem(client, &buff[0], len, client->relay);
 
     client->state = ss_connected; 
 
@@ -330,7 +354,7 @@ static void ss_relay_connected(struct bufferevent *buffev, void *_arg)
 }
 
 
-static int ss_connect_relay(redsocks_client *client)
+static void ss_connect_relay(redsocks_client *client)
 {
     struct timeval tv;
 
@@ -347,9 +371,7 @@ static int ss_connect_relay(redsocks_client *client)
     if (!client->relay) {
         redsocks_log_errno(client, LOG_ERR, "ss_connect_relay");
         redsocks_drop_client(client);
-        return -1;
     }
-    return 0;
 }
 
 static int ss_instance_init(struct redsocks_instance_t *instance)
@@ -366,13 +388,21 @@ static int ss_instance_init(struct redsocks_instance_t *instance)
     }
     else
     {
-        log_error(LOG_INFO, "using encryption method: %s", config->login);
+        log_error(LOG_INFO, "using encryption method: %d", ss->method);
     }
+    /* Setting up shared buffer */
+    ss->buff = malloc(INITIAL_BUFFER_SIZE); 
+    ss->buff_size = INITIAL_BUFFER_SIZE;
+    if (!ss->buff)
+        return -1;
     return 0;
 }
 
 static void ss_instance_fini(struct redsocks_instance_t *instance)
 {
+    ss_instance * ss = (ss_instance *)(instance + 1);
+    if (ss->buff)
+        free (ss->buff);
 }
 
 relay_subsys shadowsocks_subsys =

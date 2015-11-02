@@ -64,8 +64,8 @@ int red_recv_udp_pkt(int fd, char *buf, size_t buflen, struct sockaddr_in *inadd
                 cmsg->cmsg_len >= CMSG_LEN(sizeof(*toaddr))
             ) {
                 struct sockaddr_in* cmsgaddr = (struct sockaddr_in*)CMSG_DATA(cmsg);
-                //char buf[RED_INET_ADDRSTRLEN];
-                //log_error(LOG_DEBUG, "IP_ORIGDSTADDR: %s", red_inet_ntop(cmsgaddr, buf, sizeof(buf)));
+                char buf[RED_INET_ADDRSTRLEN];
+                log_error(LOG_DEBUG, "IP_ORIGDSTADDR: %s", red_inet_ntop(cmsgaddr, buf, sizeof(buf)));
                 memcpy(toaddr, cmsgaddr, sizeof(*toaddr));
             }
             else {
@@ -271,6 +271,26 @@ int red_socket_geterrno(struct bufferevent *buffev)
     return pseudo_errno;
 }
 
+/** simple fcntl(2) wrapper, provides errno and all logging to caller
+ * I have to use it in event-driven code because of accept(2) (see NOTES)
+ * and connect(2) (see ERRORS about EINPROGRESS)
+ */
+int fcntl_nonblock(int fd)
+{
+    int error;
+    int flags;
+
+    flags = fcntl(fd, F_GETFL);
+    if (flags == -1)
+        return -1;
+
+    error = fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    if (error)
+        return -1;
+
+    return 0;
+}
+
 int red_is_socket_connected_ok(struct bufferevent *buffev)
 {
     int pseudo_errno = red_socket_geterrno(buffev);
@@ -303,17 +323,13 @@ char *red_inet_ntop(const struct sockaddr_in* sa, char* buffer, size_t buffer_si
         port = ((struct sockaddr_in*)sa)->sin_port;
     }
     else if (sa->sin_family == AF_INET6) {
-        buffer[0] = '[';
-        retval = inet_ntop(AF_INET6, &((const struct sockaddr_in6*)sa)->sin6_addr, buffer+1, buffer_size-1);
+        retval = inet_ntop(AF_INET6, &((const struct sockaddr_in6*)sa)->sin6_addr, buffer, buffer_size);
         port = ((struct sockaddr_in6*)sa)->sin6_port;
     }
     if (retval) {
         assert(retval == buffer);
         len = strlen(retval);
-        if (sa->sin_family == AF_INET6)
-            snprintf(buffer + len, buffer_size - len, "]:%d", ntohs(port));
-        else
-            snprintf(buffer + len, buffer_size - len, ":%d", ntohs(port));
+        snprintf(buffer + len, buffer_size - len, ":%d", ntohs(port));
     }
     else {
         strcpy(buffer, placeholder);

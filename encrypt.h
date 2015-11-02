@@ -144,12 +144,12 @@ struct enc_ctx {
 
 int enc_init(enc_info * info, const char *pass, const char *method);
 void enc_free(enc_info * info);
-int enc_ctx_init(enc_info * info, struct enc_ctx *ctx, int enc);
+void enc_ctx_init(enc_info * info, struct enc_ctx *ctx, int enc);
 void enc_ctx_free(struct enc_ctx *ctx);
 int ss_encrypt(struct enc_ctx *ctx, char *plaintext, size_t plen,
                   char * ciphertext, size_t * clen);
 int ss_decrypt(struct enc_ctx *ctx, char *ciphertext, size_t clen,
                  char *plaintext, size_t *olen);
-size_t ss_calc_buffer_size(struct enc_ctx *ctx, size_t ilen);
+size_t ss_calc_buffer_size(int method, size_t ilen);
 
 #endif // _ENCRYPT_H

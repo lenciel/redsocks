@@ -2,8 +2,8 @@ REDSOCKS2
 =========
 This is a modified version of original redsocks.
 The name is changed to REDSOCKS2 to distinguish with original redsocks.
-REDSOCKS2 contains several new features besides many bug fixes to original
-redsocks.
+This variant is useful for anti-GFW (Great Fire Wall). REDSOCKS2 contains
+several new features.
 
 1. Redirect TCP connections which are blocked via proxy automatically without
 need of blacklist.
@@ -11,17 +11,19 @@ need of blacklist.
 3. Integrated [shadowsocks](http://shadowsocks.org/) proxy support(IPv4 Only).
 4. Redirect TCP connections without proxy.
 5. Redirect TCP connections via specified network interface.
-6. UDP transparent proxy via shadowsocks proxy.
-7. Support Ful-cone NAT Traversal when working with shadowsocks proxy.
 
-[Chinese Reference](https://github.com/semigodking/redsocks/wiki)
+If you feel my work done is helpful, please consider donation. Thanks.
+**Accept donations by AliPay with account <semigodking@gmail.com>**
+
+HOW it works
+------------
+Anyone can help me to complete this part?
 
 HOW TO BUILD
 ------------
 ###Prerequisites
 The following libraries are required.
 
-* libevent2
 * OpenSSL or PolarSSL
 
 ###Steps
@@ -41,7 +43,6 @@ Configurations
 --------------
 Please see 'redsocks.conf.example' for whole picture of configuration file.
 Below are additional sample configuration sections for different usage.
-Operations required to iptables are not listed here.
 
 ###Redirect Blocked Traffic via Proxy Automatically
 To use the autoproxy feature, please change the redsocks section in
@@ -92,24 +93,10 @@ by field 'login'.
 		port = 8388;
 		timeout = 13;
 		autoproxy = 1;
-		login = "aes-128-cfb"; // field 'login' is reused as encryption
+		login = 'aes-128-cfb'; // field 'login' is reused as encryption
 							   // method of shadowsocks
-		password = "your password"; // Your shadowsocks password
+		password = 'your password'; // Your shadowsocks password
 	}
-	
-	redudp {
-		local_ip = 127.0.0.1;
-		local_port = 1053;
-		ip = your.ss-server.com;
-		port = 443;
-		type = shadowsocks;
-		login = rc4-md5;
-		password = "ss server password";
-		dest_ip = 8.8.8.8;
-		dest_port = 53;
-		udp_timeout = 3;
-	}
-
 
 List of supported encryption methods(Compiled with OpenSSL):
 
@@ -132,6 +119,7 @@ List of supported encryption methods(Compiled with OpenSSL):
 List of supported encryption methods(Compiled with PolarSSL):
 
 	table
+	ARC4-128
 	ARC4-128
 	AES-128-CFB128
 	AES-192-CFB128
@@ -175,7 +163,7 @@ The configuration for forwarding connections to GoAgent is like below:
 	 timeout = 13;
 	}
 
-###Redirect UDP based DNS Request via TCP connection
+###Redirect UPD based DNS Request via TCP connection
 Sending DNS request via TCP connection is one way to prevent from DNS
 poisoning. You can redirect all UDP based DNS requests via TCP connection
 with the following config section.

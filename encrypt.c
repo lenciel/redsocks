@@ -728,23 +728,13 @@ static int cipher_context_update(cipher_ctx_t *ctx, uint8_t *output, int *olen,
 }
 
 /* Calculate buffer size required for encrypt/decrypt data */
-size_t ss_calc_buffer_size(struct enc_ctx * ctx, size_t ilen)
+size_t ss_calc_buffer_size(int method, size_t ilen)
 {
-    int method = ctx->info->method;
-    const cipher_kt_t *cipher = get_cipher_type(method);
 #if defined(USE_CRYPTO_OPENSSL)
-    if (ctx->init)
-        return ilen + EVP_CIPHER_block_size(cipher); 
-    else
-        return EVP_CIPHER_iv_length(cipher) + ilen + EVP_CIPHER_block_size(cipher); 
+    const cipher_kt_t *cipher = get_cipher_type(method);
+    return EVP_CIPHER_iv_length(cipher) + ilen + EVP_CIPHER_block_size(cipher); 
 #elif defined(USE_CRYPTO_POLARSSL)
-    if (cipher == NULL) {
-        return ilen;
-    }
-    if (ctx->init)
-        return ilen + cipher_get_block_size(cipher); 
-    else
-        return cipher->iv_size + ilen + cipher_get_block_size(cipher); 
+    // TODO: implement
 #endif
 }
 
@@ -893,11 +883,12 @@ int ss_decrypt(struct enc_ctx *ctx, char *ciphertext, size_t clen,
     }
 }
 
-int enc_ctx_init(enc_info * info, struct enc_ctx *ctx, int enc)
+
+void enc_ctx_init(enc_info * info, struct enc_ctx *ctx, int enc)
 {
     memset(ctx, 0, sizeof(struct enc_ctx));
     ctx->info = info;
-    return cipher_context_init(info, &ctx->evp, enc);
+    cipher_context_init(info, &ctx->evp, enc);
 }
 
 void enc_ctx_free(struct enc_ctx *ctx)
@@ -963,7 +954,6 @@ static int enc_key_init(enc_info * info, int method, const char *pass)
     info->key_len = bytes_to_key(cipher, md, (const uint8_t *)pass, info->key, iv);
     if (info->key_len == 0) {
         //FATAL("Cannot generate key and IV");
-        return -1;
     }
     if (method == RC4_MD5) {
         info->iv_len = 16;
@@ -984,9 +974,10 @@ int enc_init(enc_info * info, const char *pass, const char *method)
                 break;
             }
         }
-        if (m >= CIPHER_NUM)
-            // Invalid encryption method
-            return -1;
+        if (m >= CIPHER_NUM) {
+            //LOGE("Invalid cipher name: %s, use table instead", method);
+            m = TABLE;
+        }
     }
     if (m == TABLE) {
         enc_table_init(info, pass);
